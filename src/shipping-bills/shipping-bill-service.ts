@@ -1,4 +1,5 @@
 import { emptyBill, emptyInvoice, SavedBill, ShippingBillFormValues } from './model'
+import { getDemoData } from './demo-store'
 
 const BASE_URL =
   import.meta.env.VITE_BASE_URL ||
@@ -350,43 +351,47 @@ export const API_SEED_SHIPPING_BILLS = [
 
 let internalBills: SavedBill[] = normalizeApiBills(API_SEED_SHIPPING_BILLS)
 
+function getAvailableBills(): SavedBill[] {
+  const { bills: localBills, exporters, businesses } = getDemoData()
+  const savedBills = localBills.map((bill) => ({
+    ...bill,
+    values: {
+      ...bill.values,
+      exporterName:
+        bill.values.exporterName ||
+        exporters.find((exporter) => String(exporter.id) === bill.values.exporterId)?.name ||
+        '',
+      consigneeName:
+        bill.values.consigneeName ||
+        businesses.find((business) => String(business.id) === bill.values.consigneeId)?.name ||
+        ''
+    }
+  }))
+  const savedIds = new Set(savedBills.map((bill) => bill.id))
+  return [...savedBills, ...internalBills.filter((bill) => !savedIds.has(bill.id))]
+}
+
 export const shippingBillService = {
   /**
-   * Return initial in-memory bills
+   * Return seeded bills and locally saved drafts.
    */
   getInitialBills(): SavedBill[] {
-    return internalBills
+    return getAvailableBills()
   },
 
   /**
-   * Find bill by id
+   * Find a seeded bill or locally saved draft by id.
    */
   getById(id: string | number): SavedBill | undefined {
-    return internalBills.find((b) => String(b.id) === String(id))
+    return getAvailableBills().find((bill) => String(bill.id) === String(id))
   },
 
   /**
-   * GET /api/shipping-bills
-   * List all shipping bills (per shipping_bill.http)
+   * Mock GET /api/shipping-bills. Replace this implementation with the HTTP adapter when available.
    */
   async list(): Promise<SavedBill[]> {
-    try {
-      const response = await fetch(`${BASE_URL}/api/shipping-bills`, {
-        method: 'GET',
-        headers: DEFAULT_HEADERS
-      })
-      if (response.ok) {
-        const data = await response.json()
-        const normalized = normalizeApiBills(data)
-        if (normalized && normalized.length > 0) {
-          internalBills = normalized
-          return normalized
-        }
-      }
-    } catch {
-      // Fallback to internal API seed records
-    }
-    return internalBills
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    return getAvailableBills()
   },
 
 
@@ -487,4 +492,3 @@ export const shippingBillService = {
     return response.json()
   }
 }
-

@@ -1,18 +1,12 @@
-import { documentCodes } from '@/data/e-sanchit-codes'
-import { quantityCodes } from '@/data/quantity-code'
-import schemeCodes from '@/data/scheme-codes'
-import { stateOptions } from '@/data/states'
-import { Trades } from '@/data/trade-agrements'
-import { cargoOptions, contractTypes, paymentTypes, priceInclusionTypes, sealTypes, weightUnits } from '@/data/types'
 import { BranchDialog, PartyDialog } from './party-dialogs'
 import { routes } from '@/shared/route-paths'
 import { s, useFieldArray, useForm } from 'core/form'
-import { Form, SubmitButton } from 'core/form/components'
+import { Form } from 'core/form/components'
 import { navigate, useParams } from 'core/routing'
 import { toast } from 'core/toast-manager'
 import { RrCaretDown } from 'icons/rr/fi-rr-caret-down'
 import { useEffect, useRef, useState } from 'react'
-import { getFormContext, RegisterOptions, useController } from 'ui/form'
+import { getFormContext, Path, RegisterOptions, useController } from 'ui/form'
 import { Button } from 'ui/basic/button'
 import { Card, CardContent, CardHeader } from 'ui/basic/card'
 import { Checkbox } from 'ui/inputs/checkbox'
@@ -27,6 +21,15 @@ import { getDemoData, saveBill, useDemoData } from './demo-store'
 import { shippingBillService } from './shipping-bill-service'
 import { getMarksAndNumbersOptions, MarksAndNumbersOption } from './marks-and-numbers-source'
 import {
+  getDocumentTypeLabel,
+  getFileTypeLabel,
+  getShippingBillFormOptions,
+  searchDocumentTypeOptions,
+  searchFileTypeOptions,
+  ShippingBillFormOptions
+} from './shipping-bill-options-service'
+import { submitShippingBillDraft } from './shipping-bill-mock-service'
+import {
   BillInvoiceForm,
   Branch,
   Business,
@@ -38,7 +41,6 @@ import {
   invoiceTotal,
   lineTotal,
   portCountry,
-  ports,
   SavedBill,
   ShippingBillFormValues
 } from './model'
@@ -46,6 +48,20 @@ import { partyMockService } from './party-mock-service'
 import { workflowSteps } from './workflow'
 
 const positive = s.string().refine((value) => (Number(value) > 0 ? undefined : 'Enter a number above zero'))
+const optionalPositive = s
+  .string()
+  .refine((value) =>
+    !value || (Number.isFinite(Number(value)) && Number(value) > 0) ? undefined : 'Enter a number above zero'
+  )
+const optionalPositiveInteger = s
+  .string()
+  .refine((value) =>
+    !value || (Number.isInteger(Number(value)) && Number(value) > 0)
+      ? undefined
+      : 'Enter a whole number greater than zero'
+  )
+
+const decimalStep = { step: 'any' }
 
 // Leaf names are deliberate: fe-zen-arch resolves nested RHF field rules by their final path segment.
 const billSchema = s.object({
@@ -65,10 +81,10 @@ const billSchema = s.object({
   sealType: s.string().optional(),
   numberOfContainers: s.string().optional(),
   natureOfCargo: s.string().optional(),
-  grossWeight: s.string().optional(),
-  netWeight: s.string().optional(),
+  grossWeight: optionalPositive.optional(),
+  netWeight: optionalPositive.optional(),
   measurementUnit: s.string().optional(),
-  totalPackages: s.string().optional(),
+  totalPackages: optionalPositiveInteger.optional(),
   marksAndNumbers: s.string().optional(),
   loosePackets: s.string().optional(),
   mawbNumber: s.string().optional(),
@@ -117,9 +133,6 @@ interface QuickBranch {
   branchName: BranchPath
 }
 
-const portOptions = ports.map((port) => ({ value: port.code, label: `${port.name} · ${port.code}` }))
-
-const currencyOptions = ['USD', 'EUR', 'INR', 'AED', 'GBP', 'SGD'].map((value) => ({ value, label: value }))
 const dateType = 'date' as 'text'
 
 function SectionHeading({ title, description }: { title: string; description?: string }) {
@@ -176,7 +189,7 @@ interface AsyncOption {
 }
 
 interface AsyncPartySelectProps {
-  name: string
+  name: Path<ShippingBillFormValues>
   placeholder?: string
   disabled?: boolean
   className?: string
@@ -209,6 +222,8 @@ function AsyncPartySelect({
   const [query, setQuery] = useState('')
   const [options, setOptions] = useState<AsyncOption[]>([])
   const [loading, setLoading] = useState(false)
+  const [searchError, setSearchError] = useState(false)
+  const [searchRetry, setSearchRetry] = useState(0)
   const [selectedLabel, setSelectedLabel] = useState('')
   const [isOpen, setIsOpen] = useState(false)
 
@@ -225,6 +240,8 @@ function AsyncPartySelect({
       if (getInitialLabelRef.current) {
         void getInitialLabelRef.current(String(value)).then((lbl) => {
           if (active && lbl) setSelectedLabel(lbl)
+        }).catch(() => {
+          if (active) setSelectedLabel(String(value))
         })
       } else {
         const found = options.find((o) => o.value === String(value))
@@ -244,6 +261,7 @@ function AsyncPartySelect({
 
     let active = true
     setLoading(true)
+    setSearchError(false)
     const timer = setTimeout(() => {
       void fetchOptionsRef
         .current(query)
@@ -257,6 +275,7 @@ function AsyncPartySelect({
           if (active) {
             setOptions([])
             setLoading(false)
+            setSearchError(true)
           }
         })
     }, 200)
@@ -265,7 +284,7 @@ function AsyncPartySelect({
       active = false
       clearTimeout(timer)
     }
-  }, [query, isOpen, ...deps])
+  }, [query, isOpen, searchRetry, ...deps])
 
   return (
     <div>
@@ -277,8 +296,7 @@ function AsyncPartySelect({
         <PopoverTrigger
           className={clsx(
             'outline-focus-select group flex w-full cursor-pointer items-center justify-between rounded border border-gray-200 pr-2 hover:border-gray-300 disabled:cursor-not-allowed disabled:opacity-50',
-            className || 'bg-white',
-            disabled && 'cursor-not-allowed opacity-50'
+            `${className ?? 'bg-white'} ${disabled ? 'cursor-not-allowed opacity-50' : ''}`
           )}
           disabled={disabled}>
           <div className="flex items-center p-2 text-sm">
@@ -288,7 +306,7 @@ function AsyncPartySelect({
           </div>
           <RrCaretDown className="size-4 text-gray-400 transition-transform group-data-[state=open]:rotate-180" />
         </PopoverTrigger>
-        <InputError name={name} />
+        <InputError<ShippingBillFormValues> name={name} />
         <PopoverContent className="overflow-hidden rounded-md border border-gray-200 bg-white shadow-lg">
           <div className="border-b border-gray-100 p-2">
             <input
@@ -303,6 +321,13 @@ function AsyncPartySelect({
           <div className="max-h-56 overflow-y-auto p-1">
             {loading ? (
               <div className="p-3 text-center text-xs text-gray-500">Searching mock service...</div>
+            ) : searchError ? (
+              <button
+                type="button"
+                className="w-full p-3 text-center text-xs text-red-700 hover:bg-red-50"
+                onClick={() => setSearchRetry((attempt) => attempt + 1)}>
+                Could not load options. Retry
+              </button>
             ) : options.length === 0 ? (
               <div className="p-3 text-center text-xs text-gray-400">No matching results found</div>
             ) : (
@@ -496,6 +521,7 @@ function InvoiceEditor({
   index,
   invoice,
   businesses,
+  formOptions,
   onQuickAdd,
   onAddBranch,
   onRemove,
@@ -505,6 +531,7 @@ function InvoiceEditor({
   index: number
   invoice: BillInvoiceForm
   businesses: Business[]
+  formOptions: ShippingBillFormOptions
   onQuickAdd: (role: 'buyer' | 'thirdParty' | 'itemThirdParty', invoiceIndex: number, itemIndex?: number) => void
   onAddBranch: (ownerId: number, branchName: BranchPath) => void
   onRemove: () => void
@@ -544,7 +571,7 @@ function InvoiceEditor({
               <Select<ShippingBillFormValues>
                 label="Currency"
                 name={`invoices.${index}.currency`}
-                options={currencyOptions}
+                options={formOptions.currencyOptions}
                 rules={{ required: true }}
               />
             </div>
@@ -553,6 +580,7 @@ function InvoiceEditor({
                 label="Total"
                 type="number"
                 min={0}
+                {...decimalStep}
                 {...register(`invoices.${index}.invoiceTotal`)}
                 placeholder="0.00"
               />
@@ -561,7 +589,7 @@ function InvoiceEditor({
           <Select<ShippingBillFormValues>
             label="Contract"
             name={`invoices.${index}.contractType`}
-            options={contractTypes}
+            options={formOptions.contractTypes}
             rules={{ required: true }}
           />
         </div>
@@ -591,6 +619,7 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.freightRate`)}
                       className="text-right"
                       disabled={invoiceValues.freightAmount !== '' && invoiceValues.freightAmount != null}
@@ -600,6 +629,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.freightAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.freightRate !== '' && invoiceValues.freightRate != null}
@@ -607,7 +637,7 @@ function InvoiceEditor({
                   />
                   <Select<ShippingBillFormValues>
                     name={`invoices.${index}.freightCurrency`}
-                    options={currencyOptions}
+                    options={formOptions.currencyOptions}
                     placeholder={invoice.currency}
                   />
                 </div>
@@ -618,6 +648,7 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.insuranceRate`)}
                       className="text-right"
                       disabled={invoiceValues.insuranceAmount !== '' && invoiceValues.insuranceAmount != null}
@@ -627,6 +658,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.insuranceAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.insuranceRate !== '' && invoiceValues.insuranceRate != null}
@@ -634,7 +666,7 @@ function InvoiceEditor({
                   />
                   <Select<ShippingBillFormValues>
                     name={`invoices.${index}.insuranceCurrency`}
-                    options={currencyOptions}
+                    options={formOptions.currencyOptions}
                     placeholder={invoice.currency}
                   />
                 </div>
@@ -647,6 +679,7 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.commissionRate`)}
                       className="text-right"
                       disabled={invoiceValues.commissionAmount !== '' && invoiceValues.commissionAmount != null}
@@ -656,6 +689,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.commissionAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.commissionRate !== '' && invoiceValues.commissionRate != null}
@@ -663,7 +697,7 @@ function InvoiceEditor({
                   />
                   <Select<ShippingBillFormValues>
                     name={`invoices.${index}.commissionCurrency`}
-                    options={currencyOptions}
+                    options={formOptions.currencyOptions}
                     placeholder={invoice.currency}
                   />
                 </div>
@@ -674,6 +708,7 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.discountRate`)}
                       className="text-right"
                       disabled={invoiceValues.discountAmount !== '' && invoiceValues.discountAmount != null}
@@ -683,6 +718,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.discountAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.discountRate !== '' && invoiceValues.discountRate != null}
@@ -690,7 +726,7 @@ function InvoiceEditor({
                   />
                   <Select<ShippingBillFormValues>
                     name={`invoices.${index}.discountCurrency`}
-                    options={currencyOptions}
+                    options={formOptions.currencyOptions}
                     placeholder={invoice.currency}
                   />
                 </div>
@@ -703,6 +739,7 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.otherDeductionsRate`)}
                       className="text-right"
                       disabled={
@@ -714,6 +751,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.otherDeductionsAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.otherDeductionsRate !== '' && invoiceValues.otherDeductionsRate != null}
@@ -721,7 +759,7 @@ function InvoiceEditor({
                   />
                   <Select<ShippingBillFormValues>
                     name={`invoices.${index}.otherDeductionsCurrency`}
-                    options={currencyOptions}
+                    options={formOptions.currencyOptions}
                     placeholder={invoice.currency}
                   />
                 </div>
@@ -731,6 +769,7 @@ function InvoiceEditor({
                   <span className="w-28 shrink-0 font-medium text-gray-900">Packing Charges</span>
                   <Input
                     type="number"
+                    {...decimalStep}
                     {...register(`invoices.${index}.packingCharges`)}
                     className="py-1 text-right"
                     placeholder="Amount"
@@ -745,14 +784,14 @@ function InvoiceEditor({
             <Select<ShippingBillFormValues>
               label="Price includes"
               name={`invoices.${index}.freightInsuranceIncluded`}
-              options={priceInclusionTypes}
+              options={formOptions.priceInclusionTypes}
               placeholder="Select if applicable"
             />
             <Input label="Contract / order number" {...register(`invoices.${index}.contractNumber`)} />
             <Select<ShippingBillFormValues>
               label="Payment type"
               name={`invoices.${index}.natureOfPayment`}
-              options={paymentTypes}
+              options={formOptions.paymentTypes}
               placeholder="Select if applicable"
             />
             <Input label="Payment period (days)" type="number" {...register(`invoices.${index}.periodOfPayment`)} />
@@ -799,7 +838,7 @@ function InvoiceEditor({
                     <Select<ShippingBillFormValues>
                       label="Scheme code"
                       name={`invoices.${index}.items.${itemIndex}.schemeCode`}
-                      options={schemeCodes}
+                      options={formOptions.schemeCodes}
                       placeholder="Select scheme"
                     />
                     <Input
@@ -811,22 +850,25 @@ function InvoiceEditor({
                     <Input
                       label="Quantity"
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.items.${itemIndex}.quantity`)}
                     />
                     <Select<ShippingBillFormValues>
                       label="Unit"
                       name={`invoices.${index}.items.${itemIndex}.unitOfMeasurement`}
-                      options={quantityCodes}
+                      options={formOptions.quantityCodes}
                       rules={{ required: true }}
                     />
                     <Input
                       label={`Unit price (${invoice.currency || 'currency'})`}
                       type="number"
+                      {...decimalStep}
                       {...register(`invoices.${index}.items.${itemIndex}.unitPrice`)}
                     />
                     <Input
                       label="Item Total"
                       type="number"
+                      {...decimalStep}
                       placeholder={`${invoice.currency} ${lineTotal(item).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
 
                       {...register(`invoices.${index}.items.${itemIndex}.lineTotal`)}
@@ -834,18 +876,14 @@ function InvoiceEditor({
                     <Select<ShippingBillFormValues>
                       label="IGST payment"
                       name={`invoices.${index}.items.${itemIndex}.igstPaymentStatus`}
-                      options={[
-                        { value: 'NA', label: 'Not applicable' },
-                        { value: 'LUT', label: 'Under LUT / bond' },
-                        { value: 'P', label: 'Against payment' }
-                      ]}
+                      options={formOptions.igstPaymentOptions}
                       placeholder="Select if applicable"
                     />
                   </div>
                   {/* Row 3: drawback inputs (conditional) + checkboxes */}
                   <div className="mb-3 flex flex-wrap items-end gap-4">
                     {(() => {
-                      const selectedScheme = schemeCodes.find((s) => s.value === item.schemeCode)
+                      const selectedScheme = formOptions.schemeCodes.find((s) => s.value === item.schemeCode)
                       const showDrawback =
                         selectedScheme &&
                         (selectedScheme.drawback === true ||
@@ -869,6 +907,7 @@ function InvoiceEditor({
                             <Input
                               label="Drawback Quantity"
                               type="number"
+                              {...decimalStep}
                               {...register(`invoices.${index}.items.${itemIndex}.drawbackQuantity`)}
                             />
                           </div>
@@ -907,21 +946,28 @@ function InvoiceEditor({
                       <Select<ShippingBillFormValues>
                         label="Unit of rate"
                         {...register(`invoices.${index}.items.${itemIndex}.unitOfRate`)}
-                        options={quantityCodes}
-                        placeholder={invoice.items[index].unitOfMeasurement}
+                        options={formOptions.quantityCodes}
+                        placeholder={item.unitOfMeasurement}
                       />
                       <Input
                         label="Per Unit (Rate)"
                         type="number"
+                        {...decimalStep}
                         placeholder="1"
                         {...register(`invoices.${index}.items.${itemIndex}.numberOfUnits`)}
                       />
                       <Input
                         label="Present market value"
                         type="number"
+                        {...decimalStep}
                         {...register(`invoices.${index}.items.${itemIndex}.presentMarketValue`)}
                       />
-                      <Input label="GCess" type="number" {...register(`invoices.${index}.items.${itemIndex}.cess`)} />
+                      <Input
+                        label="GCess"
+                        type="number"
+                        {...decimalStep}
+                        {...register(`invoices.${index}.items.${itemIndex}.cess`)}
+                      />
                       <Input
                         label="Accessories description"
                         wrapClass="lg:col-span-3"
@@ -930,11 +976,7 @@ function InvoiceEditor({
                       <Select<ShippingBillFormValues>
                         label="Accessory status"
                         name={`invoices.${index}.items.${itemIndex}.accessoryStatus`}
-                        options={[
-                          { value: '0', label: 'No accessory' },
-                          { value: '1', label: 'Included free of cost' },
-                          { value: '2', label: 'Entered separately' }
-                        ]}
+                        options={formOptions.accessoryStatusOptions}
                         placeholder="Select if relevant"
                       />
                       {item.igstPaymentStatus === 'P' && (
@@ -942,11 +984,13 @@ function InvoiceEditor({
                           <Input
                             label="Taxable value"
                             type="number"
+                            {...decimalStep}
                             {...register(`invoices.${index}.items.${itemIndex}.taxableValue`)}
                           />
                           <Input
                             label="IGST amount"
                             type="number"
+                            {...decimalStep}
                             {...register(`invoices.${index}.items.${itemIndex}.igstAmount`)}
                           />
                         </>
@@ -959,7 +1003,7 @@ function InvoiceEditor({
                       <Select<ShippingBillFormValues>
                         label="Trade agreement code"
                         name={`invoices.${index}.items.${itemIndex}.tradeAgreementsCode`}
-                        options={Trades}
+                        options={formOptions.Trades}
                         placeholder="NCPTI"
                       />
                       <Input label="End use code" {...register(`invoices.${index}.items.${itemIndex}.endUseOfItem`)} />
@@ -1035,20 +1079,8 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
           <AsyncPartySelect
             name={`documents.${index}.documentTypeCode`}
             placeholder="Search document type..."
-            fetchOptions={async (query) => {
-              const q = query.toLowerCase().trim()
-              const filtered = documentCodes.filter(
-                (doc) => doc.label.toLowerCase().includes(q) || doc.value.toLowerCase().includes(q)
-              )
-              return filtered.map((doc) => ({
-                value: doc.value,
-                label: doc.label
-              }))
-            }}
-            getInitialLabel={async (val) => {
-              const found = documentCodes.find((doc) => doc.value === val || doc.label === val)
-              return found ? found.label : val
-            }}
+            fetchOptions={searchDocumentTypeOptions}
+            getInitialLabel={getDocumentTypeLabel}
           />
         </div>
         <Input label="Image reference number" {...register(`documents.${index}.imageReferenceNumber`)} />
@@ -1069,17 +1101,8 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
               name={`documents.${index}.fileType`}
               placeholder="Search file type..."
               className="bg-transparent"
-              fetchOptions={async (query) => {
-                const q = query.toLowerCase().trim()
-                const options = [{ value: 'pdf', label: 'PDF' }]
-                return options.filter(
-                  (doc) => doc.label.toLowerCase().includes(q) || doc.value.toLowerCase().includes(q)
-                )
-              }}
-              getInitialLabel={async (val) => {
-                const found = [{ value: 'pdf', label: 'PDF' }].find((doc) => doc.value === val || doc.label === val)
-                return found ? found.label : val
-              }}
+              fetchOptions={searchFileTypeOptions}
+              getInitialLabel={getFileTypeLabel}
             />
           </div>
           <Input label="Place of issue" {...register(`documents.${index}.placeOfIssue`)} />
@@ -1130,6 +1153,10 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
   const formCtx = useForm<ShippingBillFormValues>(billSchema, { defaultValues: bill?.values ?? emptyBill() })
   const { register, control, setValue, formState } = formCtx.hooks
   const values = formCtx.hooks.watch()
+  const [formOptions, setFormOptions] = useState<ShippingBillFormOptions | null>(null)
+  const [formOptionsLoading, setFormOptionsLoading] = useState(true)
+  const [formOptionsError, setFormOptionsError] = useState('')
+  const [formOptionsRetry, setFormOptionsRetry] = useState(0)
   const { fields: invoices, append: addInvoice, remove: removeInvoice } = useFieldArray({ control, name: 'invoices' })
   const {
     fields: containers,
@@ -1153,10 +1180,33 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
   const [quickBranch, setQuickBranch] = useState<QuickBranch | null>(null)
   const [marksAndNumbersOptions, setMarksAndNumbersOptions] = useState<MarksAndNumbersOption[]>([])
   const [marksAndNumbersLoading, setMarksAndNumbersLoading] = useState(false)
+  const [marksAndNumbersError, setMarksAndNumbersError] = useState('')
   const previousExporterId = useRef(values.exporterId)
   const consigneeOptions = businesses.filter(
     (business) => business.isConsignee || String(business.id) === values.consigneeId
   )
+
+  useEffect(() => {
+    let active = true
+    setFormOptionsLoading(true)
+    setFormOptionsError('')
+    void getShippingBillFormOptions()
+      .then((options) => {
+        if (active) setFormOptions(options)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setFormOptions(null)
+        setFormOptionsError(error instanceof Error ? error.message : 'Unable to load shipping bill options.')
+      })
+      .finally(() => {
+        if (active) setFormOptionsLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [formOptionsRetry])
 
   useEffect(() => {
     const exporterId = values.exporterId
@@ -1168,6 +1218,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
     let cancelled = false
     setMarksAndNumbersOptions([])
     setMarksAndNumbersLoading(Boolean(exporterId))
+    setMarksAndNumbersError('')
     if (exporterId) {
       void getMarksAndNumbersOptions(exporterId)
         .then((options) => {
@@ -1179,6 +1230,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
           if (cancelled) return
           setMarksAndNumbersOptions([])
           setMarksAndNumbersLoading(false)
+          setMarksAndNumbersError('Could not load marks and numbers. Please change the exporter and try again.')
         })
     }
 
@@ -1215,25 +1267,11 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
   }, [formState.submitCount, formState.errors])
 
   async function handleSave(data: ShippingBillFormValues) {
-    try {
-      const saved = saveBill(data, draftId)
-      setDraftId(saved.id)
-      console.log('Shipping bill save payload', saved.payload)
+    const saved = await submitShippingBillDraft(data, draftId)
+    setDraftId(saved.id)
 
-      // Submit payload to backend API (POST /api/shipping-bills from shipping_bill.http)
-      try {
-        const apiResult = await shippingBillService.upsert(data)
-        console.log('API response from POST /api/shipping-bills:', apiResult)
-      } catch (apiErr) {
-        console.log('Backend API sync notice (saved locally):', apiErr)
-      }
-
-      toast.success(bill ? 'Shipping bill updated' : 'Shipping bill created')
-      navigate(routes.toShippingBillEdit(saved.id))
-    } catch (err: any) {
-      console.error('Error saving shipping bill:', err)
-      toast.error('Failed to save shipping bill')
-    }
+    toast.success(bill ? 'Shipping bill updated' : 'Shipping bill created')
+    navigate(routes.toShippingBillEdit(saved.id))
   }
 
   function handleQuickSaved(party: Exporter | Business) {
@@ -1261,9 +1299,25 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
     }
   }
 
-  const exporter = exporters.find((item) => String(item.id) === values.exporterId)
-  const consignee = businesses.find((item) => String(item.id) === values.consigneeId)
-  const totalLines = values.invoices.reduce((sum, invoice) => sum + invoice.items.length, 0)
+  if (formOptionsLoading) {
+    return (
+      <div role="status" className="rounded-lg border border-gray-200 bg-white p-8 text-center text-sm text-gray-600">
+        Loading shipping bill options…
+      </div>
+    )
+  }
+
+  if (!formOptions) {
+    return (
+      <div role="alert" className="rounded-lg border border-red-200 bg-white p-8 text-center">
+        <h1 className="font-semibold text-gray-950">Shipping bill options unavailable</h1>
+        <p className="mt-2 text-sm text-gray-600">{formOptionsError || 'Please try loading the form again.'}</p>
+        <Button className="mt-4" onClick={() => setFormOptionsRetry((attempt) => attempt + 1)}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-5">
@@ -1390,26 +1444,20 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                     <Select<ShippingBillFormValues>
                       label="Discharge port"
                       name="dischargePort"
-                      options={portOptions}
+                      options={formOptions.portOptions}
                       placeholder="Defaults to destination"
                     />
                     <Select<ShippingBillFormValues>
                       label="Origin state"
                       name="originStateCode"
-                      options={stateOptions}
+                      options={formOptions.stateOptions}
                       placeholder="Defaults to Branch State Code"
                     />
                     <div></div>
                     <Select<ShippingBillFormValues>
                       label="NFEI category"
                       name="nfeiCategory"
-                      options={[
-                        ['01', 'Free trade sample'],
-                        ['02', 'Diplomatic goods'],
-                        ['03', 'Warranty replacement'],
-                        ['07', 'Gift parcel'],
-                        ['08', 'Other']
-                      ].map(([value, label]) => ({ value, label }))}
+                      options={formOptions.nfeiCategoryOptions}
                       placeholder="Not applicable"
                     />
                     <Input label="RBI waiver number" {...register('rbiWaiverNumber')} />
@@ -1423,11 +1471,11 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                     <Select<ShippingBillFormValues>
                       label="Nature of cargo"
                       name="natureOfCargo"
-                      options={cargoOptions}
+                      options={formOptions.cargoOptions}
                     />
-                    <Input label="Gross weight" type="number" {...register('grossWeight')} />
-                    <Input label="Net weight" type="number" {...register('netWeight')} />
-                    <Select<ShippingBillFormValues> label="Weight unit" name="measurementUnit" options={weightUnits} />
+                    <Input label="Gross weight" type="number" {...decimalStep} {...register('grossWeight')} />
+                    <Input label="Net weight" type="number" {...decimalStep} {...register('netWeight')} />
+                    <Select<ShippingBillFormValues> label="Weight unit" name="measurementUnit" options={formOptions.weightUnits} />
                     <Input label="Total packages" type="number" {...register('totalPackages')} />
                     <Select<ShippingBillFormValues>
                       label="Marks and numbers"
@@ -1443,13 +1491,18 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                       disabled={!values.exporterId || marksAndNumbersLoading || !marksAndNumbersOptions.length}
                       wrapClass="sm:col-span-3"
                     />
+                    {marksAndNumbersError && (
+                      <p role="alert" className="text-xs text-red-700 sm:col-span-3">
+                        {marksAndNumbersError}
+                      </p>
+                    )}
                   </div>
                   <Advanced title="Additional Details">
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                       <Select<ShippingBillFormValues>
                         label="Seal type"
                         name="sealType"
-                        options={sealTypes}
+                        options={formOptions.sealTypes}
                         placeholder="Select if relevant"
                       />
                       {containers.length === 0 && (
@@ -1482,6 +1535,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                 index={index}
                 invoice={values.invoices[index] ?? emptyInvoice()}
                 businesses={businesses}
+                formOptions={formOptions}
                 onQuickAdd={(role, invoiceIndex, itemIndex) =>
                   setQuickAdd({ kind: 'business', role, invoiceIndex, itemIndex })
                 }
@@ -1519,11 +1573,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                         <Select<ShippingBillFormValues>
                           label="Size"
                           name={`containers.${index}.containerSize`}
-                          options={[
-                            { value: '20', label: '20 ft' },
-                            { value: '40', label: '40 ft' },
-                            { value: '45', label: '45 ft' }
-                          ]}
+                          options={formOptions.containerSizeOptions}
                           placeholder="Select size"
                         />
                         <Input label="Seal number" {...register(`containers.${index}.exciseSealNumber`)} />
@@ -1531,11 +1581,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                         <Select<ShippingBillFormValues>
                           label="Seal type"
                           name={`containers.${index}.sealType`}
-                          options={[
-                            { value: 1, label: 'BTSL - Bottle Seal' },
-                            { value: 2, label: 'ESEAL - Electronic Seal' },
-                            { value: 3, label: 'RFID - Radio Frequency Identifier' }
-                          ]}
+                          options={formOptions.containerSealTypeOptions}
                           placeholder="Select if needed"
                         />
                         <Input label="Seal device ID" {...register(`containers.${index}.sealDeviceId`)} />
@@ -1672,10 +1718,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                       <Select<ShippingBillFormValues>
                         label="Goods source"
                         name={`licenses.${index}.indigenousOrImported`}
-                        options={[
-                          { value: 'I', label: 'Imported' },
-                          { value: 'D', label: 'Indigenous' }
-                        ]}
+                        options={formOptions.goodsSourceOptions}
                         placeholder="Select if needed"
                       />
                     </div>

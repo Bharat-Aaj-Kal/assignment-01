@@ -19,13 +19,12 @@ export default function ListDashboard() {
   const fetchBills = async () => {
     setIsLoading(true)
     try {
-      const remoteBills = await shippingBillService.list()
-      if (remoteBills && remoteBills.length > 0) {
-        setBills(remoteBills)
-        toast.success(`Loaded ${remoteBills.length} shipping bills`)
-      }
-    } catch (err: any) {
-      console.warn('Backend API listing notice:', err)
+      const updatedBills = await shippingBillService.list()
+      setBills(updatedBills)
+      toast.success(`Loaded ${updatedBills.length} shipping bills`)
+    } catch (error: unknown) {
+      console.error('Failed to refresh shipping bills:', error)
+      toast.error(error instanceof Error ? error.message : 'Could not refresh shipping bills. Please try again.')
     } finally {
       setIsLoading(false)
     }
