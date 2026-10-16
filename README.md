@@ -29,3 +29,18 @@ pnpm build     # production build
 - Don't use react-query mutation for react-hook-form submit handler.
 - For HMR (hot refresh), the file must export only react component, and not any other constant or object.
 - While most input elements use `...register('name')`, custom elements like select require `<Select<T> name="name" />` instead.
+
+### AI Usage & Approach
+
+AI assistance was used to review the existing codebase, identify focused refactoring opportunities, troubleshoot TypeScript issues, and improve form and dashboard behavior. Changes were made incrementally, with existing functionality checked after each step.
+
+**Approach**
+- Kept the existing React, TypeScript, and shared UI architecture.
+- Used a service layer for asynchronous shipping-bill operations, with a configurable mock API mode for local development.
+- Added dashboard loading and error feedback, retry support, and an empty state.
+- Improved save handling with an in-progress indicator and duplicate-submission protection.
+- Verified changes using the TypeScript compiler and `git diff --check`, and manually tested bill creation, editing, dashboard loading, and saving behavior.
+
+**Limitations**
+- Mock mode is intended for local development. Real backend integration still depends on a reachable API and compatible request/response formats.
+- Testing described above is based on the checks and manual scenarios performed; it does not imply a complete automated test suite.

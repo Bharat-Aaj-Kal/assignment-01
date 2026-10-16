@@ -1,6 +1,5 @@
 import { routes } from '@/shared/route-paths'
 import { invoiceTotal, SavedBill } from '@/shipping-bills/model'
-import { shippingBillService } from '@/shipping-bills/shipping-bill-service'
 import { navigate } from 'core/routing'
 import { toast } from 'core/toast-manager'
 import { useEffect, useState } from 'react'
@@ -9,23 +8,33 @@ import { Button } from 'ui/basic/button'
 import { Card, CardContent } from 'ui/basic/card'
 import { Table } from 'ui/basic/table'
 import { Input } from 'ui/inputs/input'
+import { isMockApiEnabled, shippingBillService } from '@/shipping-bills/shipping-bill-service'
 
 export default function ListDashboard() {
-  const [bills, setBills] = useState<SavedBill[]>(() => shippingBillService.getInitialBills())
+  const [bills, setBills] = useState<SavedBill[]>([])
   const [search, setSearch] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
 
   const fetchBills = async () => {
     setIsLoading(true)
+    setLoadError(null)
+
     try {
       const remoteBills = await shippingBillService.list()
-      if (remoteBills && remoteBills.length > 0) {
-        setBills(remoteBills)
-        toast.success(`Loaded ${remoteBills.length} shipping bills`)
+      setBills(remoteBills)
+      if (remoteBills.length > 0) {
+        toast.success(
+          isMockApiEnabled
+            ? `Loaded ${remoteBills.length} demo shipping bills`
+            : `Loaded ${remoteBills.length} shipping bills`
+        )
       }
-    } catch (err: any) {
-      console.warn('Backend API listing notice:', err)
+    } catch (err) {
+      console.error('Failed to load shipping bills:', err)
+      setLoadError('Could not load shipping bills. Please try syncing again.')
+      toast.error('Failed to load shipping bills')
     } finally {
       setIsLoading(false)
     }
@@ -106,16 +115,25 @@ export default function ListDashboard() {
         <Card>
           <CardContent className="pt-5">
             <p className="text-xs text-gray-500">Exporters</p>
-            <p className="mt-1 text-2xl font-semibold">{uniqueExportersCount || 1}</p>
+            <p className="mt-1 text-2xl font-semibold">{uniqueExportersCount}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-5">
             <p className="text-xs text-gray-500">Businesses / Consignees</p>
-            <p className="mt-1 text-2xl font-semibold">{uniqueConsigneesCount || 1}</p>
+            <p className="mt-1 text-2xl font-semibold">{uniqueConsigneesCount}</p>
           </CardContent>
         </Card>
       </div>
+
+      {loadError && (
+        <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {loadError}
+          <button type="button" className="ml-2 underline" onClick={fetchBills} disabled={isLoading}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <Card>
         <CardContent className="space-y-4 pt-6">
@@ -132,7 +150,15 @@ export default function ListDashboard() {
               {filtered.length} {filtered.length === 1 ? 'bill' : 'bills'}
             </span>
           </div>
-          {filtered.length ? (
+          {isLoading ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-lg border border-dashed border-gray-300 p-10 text-center">
+              <p className="font-medium">Loading shipping bills...</p>
+              <p className="mt-1 text-sm text-gray-500">Please wait while we fetch your bills.</p>
+            </div>
+          ) : filtered.length ? (
             <Table>
               <thead>
                 <tr>
@@ -172,7 +198,11 @@ export default function ListDashboard() {
                       <td>
                         <Badge variant="secondary">Draft</Badge>
                       </td>
-                      <td>{bill.updated && !isNaN(new Date(bill.updated).getTime()) ? new Date(bill.updated).toLocaleDateString() : '—'}</td>
+                      <td>
+                        {bill.updated && !isNaN(new Date(bill.updated).getTime())
+                          ? new Date(bill.updated).toLocaleDateString()
+                          : '—'}
+                      </td>
                       <td className="text-right">
                         <div className="flex items-center justify-end gap-2">
                           <Button

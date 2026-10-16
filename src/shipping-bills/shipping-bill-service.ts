@@ -1,9 +1,14 @@
 import { emptyBill, emptyInvoice, SavedBill, ShippingBillFormValues } from './model'
+import { getDemoData, saveBill as saveLocalBill } from './demo-store'
 
 const BASE_URL =
   import.meta.env.VITE_BASE_URL ||
   import.meta.env.PUBLIC_API_URL ||
   'http://192.168.1.123:3408'
+
+  const USE_MOCK_API = import.meta.env.VITE_USE_MOCK_API !== 'false'
+
+  export const isMockApiEnabled = USE_MOCK_API
 
 const DEFAULT_HEADERS = {
   Accept: 'application/json',
@@ -369,26 +374,29 @@ export const shippingBillService = {
    * GET /api/shipping-bills
    * List all shipping bills (per shipping_bill.http)
    */
-  async list(): Promise<SavedBill[]> {
-    try {
-      const response = await fetch(`${BASE_URL}/api/shipping-bills`, {
-        method: 'GET',
-        headers: DEFAULT_HEADERS
-      })
-      if (response.ok) {
-        const data = await response.json()
-        const normalized = normalizeApiBills(data)
-        if (normalized && normalized.length > 0) {
-          internalBills = normalized
-          return normalized
-        }
-      }
-    } catch {
-      // Fallback to internal API seed records
-    }
-    return internalBills
-  },
 
+  async list(): Promise<SavedBill[]> {
+    if (USE_MOCK_API) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const demoBills = getDemoData().bills
+      internalBills = demoBills
+      return demoBills
+    }
+
+    const response = await fetch(`${BASE_URL}/api/shipping-bills`, {
+      method: 'GET',
+      headers: DEFAULT_HEADERS
+    })
+
+    if (!response.ok) {
+      throw new Error(`Failed to load shipping bills: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    const normalized = normalizeApiBills(data)
+    internalBills = normalized
+    return normalized
+  },
 
   /**
    * GET /api/shipping-bills/:id/flat-file
@@ -444,9 +452,7 @@ export const shippingBillService = {
         if (contentType.includes('application/json')) {
           const json = await response.json()
           const content =
-            typeof json === 'string'
-              ? json
-              : json.file || json.content || json.data || JSON.stringify(json, null, 2)
+            typeof json === 'string' ? json : json.file || json.content || json.data || JSON.stringify(json, null, 2)
           blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
         } else {
           blob = await response.blob()
@@ -474,16 +480,27 @@ export const shippingBillService = {
    * POST /api/shipping-bills
    * Upsert shipping bill (per shipping_bill.http)
    */
-  async upsert(values: ShippingBillFormValues) {
+
+  async upsert(values: ShippingBillFormValues, id?: number) {
+    if (USE_MOCK_API) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const saved = saveLocalBill(values, id)
+      internalBills = getDemoData().bills
+      return saved
+    }
+
     const payload = toHttpShippingBillPayload(values)
     const response = await fetch(`${BASE_URL}/api/shipping-bills`, {
       method: 'POST',
       headers: DEFAULT_HEADERS,
       body: JSON.stringify(payload)
     })
+
     if (!response.ok) {
       throw new Error(`Failed to save shipping bill: ${response.status} ${response.statusText}`)
     }
+
     return response.json()
   }
 }

@@ -4,17 +4,16 @@ import schemeCodes from '@/data/scheme-codes'
 import { stateOptions } from '@/data/states'
 import { Trades } from '@/data/trade-agrements'
 import { cargoOptions, contractTypes, paymentTypes, priceInclusionTypes, sealTypes, weightUnits } from '@/data/types'
-import { BranchDialog, PartyDialog } from './party-dialogs'
 import { routes } from '@/shared/route-paths'
 import { s, useFieldArray, useForm } from 'core/form'
-import { Form, SubmitButton } from 'core/form/components'
+import { Form } from 'core/form/components'
 import { navigate, useParams } from 'core/routing'
 import { toast } from 'core/toast-manager'
 import { RrCaretDown } from 'icons/rr/fi-rr-caret-down'
 import { useEffect, useRef, useState } from 'react'
-import { getFormContext, RegisterOptions, useController } from 'ui/form'
 import { Button } from 'ui/basic/button'
 import { Card, CardContent, CardHeader } from 'ui/basic/card'
+import { getFormContext, RegisterOptions, useController } from 'ui/form'
 import { Checkbox } from 'ui/inputs/checkbox'
 import { InputError } from 'ui/inputs/error'
 import { Input } from 'ui/inputs/input'
@@ -24,7 +23,6 @@ import { PopoverContext } from 'ui/interactive/popover-context'
 import { Tabs, TabsList, TabsTrigger } from 'ui/interactive/tabs'
 import { clsx, getContext } from 'ui/utils'
 import { getDemoData, saveBill, useDemoData } from './demo-store'
-import { shippingBillService } from './shipping-bill-service'
 import { getMarksAndNumbersOptions, MarksAndNumbersOption } from './marks-and-numbers-source'
 import {
   BillInvoiceForm,
@@ -42,7 +40,9 @@ import {
   SavedBill,
   ShippingBillFormValues
 } from './model'
+import { BranchDialog, PartyDialog } from './party-dialogs'
 import { partyMockService } from './party-mock-service'
+import { shippingBillService } from './shipping-bill-service'
 import { workflowSteps } from './workflow'
 
 const positive = s.string().refine((value) => (Number(value) > 0 ? undefined : 'Enter a number above zero'))
@@ -76,7 +76,10 @@ const billSchema = s.object({
   invoiceNumber: s.string(),
   invoiceDate: s.string(),
   currency: s.string(),
-  invoiceTotal: s.string().refine((value) => (!value || Number(value) >= 0 ? undefined : 'Total cannot be negative')).optional(),
+  invoiceTotal: s
+    .string()
+    .refine((value) => (!value || Number(value) >= 0 ? undefined : 'Total cannot be negative'))
+    .optional(),
   contractType: s.string(),
   buyerId: s.string().optional(),
   buyerBranchId: s.string().optional(),
@@ -270,15 +273,11 @@ function AsyncPartySelect({
   return (
     <div>
       <input type="hidden" name={name} value={value ?? ''} ref={ref} disabled={disabled} />
-      <Popover
-        placement="bottom-start"
-        fallbackPlacements={['top-start']}
-        onOpenCallback={(open) => setIsOpen(open)}>
+      <Popover placement="bottom-start" fallbackPlacements={['top-start']} onOpenCallback={(open) => setIsOpen(open)}>
         <PopoverTrigger
           className={clsx(
-            'outline-focus-select group flex w-full cursor-pointer items-center justify-between rounded border border-gray-200 pr-2 hover:border-gray-300 disabled:cursor-not-allowed disabled:opacity-50',
-            className || 'bg-white',
-            disabled && 'cursor-not-allowed opacity-50'
+            'outline-focus-select ...',
+            `${className || 'bg-white'}${disabled ? 'cursor-not-allowed opacity-50' : ''}`
           )}
           disabled={disabled}>
           <div className="flex items-center p-2 text-sm">
@@ -288,7 +287,7 @@ function AsyncPartySelect({
           </div>
           <RrCaretDown className="size-4 text-gray-400 transition-transform group-data-[state=open]:rotate-180" />
         </PopoverTrigger>
-        <InputError name={name} />
+        <InputError<any> name={name} />
         <PopoverContent className="overflow-hidden rounded-md border border-gray-200 bg-white shadow-lg">
           <div className="border-b border-gray-100 p-2">
             <input
@@ -371,11 +370,11 @@ function PartyFields({
 }: {
   formCtx: BillFormContext
   ownerName:
-  | 'exporterId'
-  | 'consigneeId'
-  | `invoices.${number}.buyerId`
-  | `invoices.${number}.thirdPartyId`
-  | `invoices.${number}.items.${number}.itemThirdPartyId`
+    | 'exporterId'
+    | 'consigneeId'
+    | `invoices.${number}.buyerId`
+    | `invoices.${number}.thirdPartyId`
+    | `invoices.${number}.items.${number}.itemThirdPartyId`
   branchName: BranchPath
   label: string
   kind: 'exporter' | 'business'
@@ -1148,6 +1147,8 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
   } = useFieldArray({ control, name: 'documents' })
   const { fields: licenses, append: addLicense, remove: removeLicense } = useFieldArray({ control, name: 'licenses' })
   const [activeTab, setActiveTab] = useState('details')
+  const [isSaving, setIsSaving] = useState(false)
+  const saveInProgress = useRef(false)
   const [draftId, setDraftId] = useState<number | undefined>(bill?.id)
   const [quickAdd, setQuickAdd] = useState<QuickAdd | null>(null)
   const [quickBranch, setQuickBranch] = useState<QuickBranch | null>(null)
@@ -1214,25 +1215,26 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
     // else: keep user on whichever tab they submitted from
   }, [formState.submitCount, formState.errors])
 
-  async function handleSave(data: ShippingBillFormValues) {
-    try {
-      const saved = saveBill(data, draftId)
-      setDraftId(saved.id)
-      console.log('Shipping bill save payload', saved.payload)
 
-      // Submit payload to backend API (POST /api/shipping-bills from shipping_bill.http)
-      try {
-        const apiResult = await shippingBillService.upsert(data)
-        console.log('API response from POST /api/shipping-bills:', apiResult)
-      } catch (apiErr) {
-        console.log('Backend API sync notice (saved locally):', apiErr)
-      }
+
+  async function handleSave(data: ShippingBillFormValues) {
+    if (saveInProgress.current) return
+
+    saveInProgress.current = true
+    setIsSaving(true)
+
+    try {
+      const saved = await shippingBillService.upsert(data, draftId)
+      setDraftId(saved.id)
 
       toast.success(bill ? 'Shipping bill updated' : 'Shipping bill created')
       navigate(routes.toShippingBillEdit(saved.id))
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error saving shipping bill:', err)
       toast.error('Failed to save shipping bill')
+    } finally {
+      saveInProgress.current = false
+      setIsSaving(false)
     }
   }
 
@@ -1261,10 +1263,6 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
     }
   }
 
-  const exporter = exporters.find((item) => String(item.id) === values.exporterId)
-  const consignee = businesses.find((item) => String(item.id) === values.consigneeId)
-  const totalLines = values.invoices.reduce((sum, invoice) => sum + invoice.items.length, 0)
-
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1286,12 +1284,13 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
           return (
             <div
               key={step.id}
-              className={`rounded-lg border p-3 ${isShippingBill
-                ? 'border-primary-300 bg-primary-50'
-                : 'border-gray-200 bg-gray-50'
-                }`}>
+              className={`rounded-lg border p-3 ${
+                isShippingBill ? 'border-primary-300 bg-primary-50' : 'border-gray-200 bg-gray-50'
+              }`}>
               <div className="flex items-center gap-2 text-sm font-medium">
-                <span className="flex size-6 items-center justify-center rounded-full bg-white text-xs">{index + 1}</span>
+                <span className="flex size-6 items-center justify-center rounded-full bg-white text-xs">
+                  {index + 1}
+                </span>
                 {step.title}
               </div>
               <p className="ml-8 text-xs text-gray-500">{step.description}</p>
@@ -1717,8 +1716,8 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
                 Save & Next
               </Button>
             ) : (
-              <Button type="submit">
-                Save changes
+              <Button type="submit" disabled={isSaving}>
+                {isSaving ? 'Saving...' : 'Save changes'}
               </Button>
             )}
           </div>
@@ -1749,7 +1748,7 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
 export default function ShippingBillPage() {
   const { id } = useParams<{ id?: string }>()
   const { bills } = useDemoData()
-  const bill = id ? (bills.find((item) => item.id === Number(id)) || shippingBillService.getById(id)) : undefined
+  const bill = id ? bills.find((item) => item.id === Number(id)) || shippingBillService.getById(id) : undefined
   if (id && !bill)
     return (
       <div className="space-y-3">
