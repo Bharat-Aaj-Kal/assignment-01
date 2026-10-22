@@ -7,12 +7,13 @@ import { cargoOptions, contractTypes, paymentTypes, priceInclusionTypes, sealTyp
 import { BranchDialog, PartyDialog } from './party-dialogs'
 import { routes } from '@/shared/route-paths'
 import { s, useFieldArray, useForm } from 'core/form'
-import { Form, SubmitButton } from 'core/form/components'
+import { Form } from 'core/form/components'
 import { navigate, useParams } from 'core/routing'
 import { toast } from 'core/toast-manager'
 import { RrCaretDown } from 'icons/rr/fi-rr-caret-down'
 import { useEffect, useRef, useState } from 'react'
-import { getFormContext, RegisterOptions, useController } from 'ui/form'
+import { getFormContext, getNestedSchema, useController } from 'ui/form'
+import type { Path, RegisterOptions } from 'ui/form'
 import { Button } from 'ui/basic/button'
 import { Card, CardContent, CardHeader } from 'ui/basic/card'
 import { Checkbox } from 'ui/inputs/checkbox'
@@ -23,8 +24,8 @@ import { Popover, PopoverContent, PopoverTrigger } from 'ui/interactive/popover'
 import { PopoverContext } from 'ui/interactive/popover-context'
 import { Tabs, TabsList, TabsTrigger } from 'ui/interactive/tabs'
 import { clsx, getContext } from 'ui/utils'
-import { getDemoData, saveBill, useDemoData } from './demo-store'
-import { shippingBillService } from './shipping-bill-service'
+
+import { shippingBillMockService } from './shipping-bill-mock-service'
 import { getMarksAndNumbersOptions, MarksAndNumbersOption } from './marks-and-numbers-source'
 import {
   BillInvoiceForm,
@@ -42,10 +43,25 @@ import {
   SavedBill,
   ShippingBillFormValues
 } from './model'
-import { partyMockService } from './party-mock-service'
+import { getPartyDirectory, partyMockService } from './party-mock-service'
 import { workflowSteps } from './workflow'
 
+// cspell:words sublabel ROSCTL NCPTI BTSL ESEAL RFID
+
 const positive = s.string().refine((value) => (Number(value) > 0 ? undefined : 'Enter a number above zero'))
+const nonNegativeOptional = s
+  .string()
+  .refine((value) => (!value || Number(value) >= 0 ? undefined : 'Enter a zero or positive number'))
+  .optional()
+const percentageOptional = s
+  .string()
+  .refine(
+    (value) =>
+      !value || (Number(value) >= 0 && Number(value) <= 100)
+        ? undefined
+        : 'Enter a percentage from 0 to 100'
+  )
+  .optional()
 
 // Leaf names are deliberate: fe-zen-arch resolves nested RHF field rules by their final path segment.
 const billSchema = s.object({
@@ -77,6 +93,19 @@ const billSchema = s.object({
   invoiceDate: s.string(),
   currency: s.string(),
   invoiceTotal: s.string().refine((value) => (!value || Number(value) >= 0 ? undefined : 'Total cannot be negative')).optional(),
+  freightRate: percentageOptional,
+  freightAmount: nonNegativeOptional,
+  insuranceRate: percentageOptional,
+  insuranceAmount: nonNegativeOptional,
+  commissionRate: percentageOptional,
+  commissionAmount: nonNegativeOptional,
+  discountRate: percentageOptional,
+  discountAmount: nonNegativeOptional,
+  otherDeductionsRate: percentageOptional,
+  otherDeductionsAmount: nonNegativeOptional,
+  packingCharges: nonNegativeOptional,
+  periodOfPayment: nonNegativeOptional,
+  lineTotal: nonNegativeOptional,
   contractType: s.string(),
   buyerId: s.string().optional(),
   buyerBranchId: s.string().optional(),
@@ -175,8 +204,15 @@ interface AsyncOption {
   sublabel?: string
 }
 
+function toOptionValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return value.toString()
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  return ''
+}
+
 interface AsyncPartySelectProps {
-  name: string
+  name: Path<ShippingBillFormValues>
   placeholder?: string
   disabled?: boolean
   className?: string
@@ -196,13 +232,13 @@ function AsyncPartySelect({
   fetchOptions,
   getInitialLabel
 }: AsyncPartySelectProps) {
-  const ctx = getFormContext()
+  const ctx = getFormContext<ShippingBillFormValues>()
   const {
     field: { onChange, value, ref }
   } = useController({
     name,
     control: ctx.hooks.control,
-    rules: ctx.schema.shape[name] ?? rules,
+    rules: { ...getNestedSchema(name, ctx.schema), ...rules } as RegisterOptions<ShippingBillFormValues, typeof name>,
     disabled
   })
 
@@ -217,17 +253,18 @@ function AsyncPartySelect({
 
   const getInitialLabelRef = useRef(getInitialLabel)
   getInitialLabelRef.current = getInitialLabel
+  const selectedValue = toOptionValue(value)
 
   // Fetch label when selected value changes or on mount
   useEffect(() => {
     let active = true
-    if (value) {
+    if (selectedValue !== '') {
       if (getInitialLabelRef.current) {
-        void getInitialLabelRef.current(String(value)).then((lbl) => {
+        void getInitialLabelRef.current(selectedValue).then((lbl) => {
           if (active && lbl) setSelectedLabel(lbl)
         })
       } else {
-        const found = options.find((o) => o.value === String(value))
+        const found = options.find((o) => o.value === selectedValue)
         if (found) setSelectedLabel(found.label)
       }
     } else {
@@ -236,7 +273,7 @@ function AsyncPartySelect({
     return () => {
       active = false
     }
-  }, [value, ...deps])
+  }, [selectedValue, ...deps])
 
   // Fetch search results asynchronously whenever query changes or popover opens
   useEffect(() => {
@@ -269,7 +306,7 @@ function AsyncPartySelect({
 
   return (
     <div>
-      <input type="hidden" name={name} value={value ?? ''} ref={ref} disabled={disabled} />
+      <input type="hidden" name={name} value={selectedValue} ref={ref} disabled={disabled} />
       <Popover
         placement="bottom-start"
         fallbackPlacements={['top-start']}
@@ -277,8 +314,7 @@ function AsyncPartySelect({
         <PopoverTrigger
           className={clsx(
             'outline-focus-select group flex w-full cursor-pointer items-center justify-between rounded border border-gray-200 pr-2 hover:border-gray-300 disabled:cursor-not-allowed disabled:opacity-50',
-            className || 'bg-white',
-            disabled && 'cursor-not-allowed opacity-50'
+            `${className ?? 'bg-white'}${disabled ? ' cursor-not-allowed opacity-50' : ''}`
           )}
           disabled={disabled}>
           <div className="flex items-center p-2 text-sm">
@@ -288,7 +324,7 @@ function AsyncPartySelect({
           </div>
           <RrCaretDown className="size-4 text-gray-400 transition-transform group-data-[state=open]:rotate-180" />
         </PopoverTrigger>
-        <InputError name={name} />
+        <InputError<ShippingBillFormValues> name={name} />
         <PopoverContent className="overflow-hidden rounded-md border border-gray-200 bg-white shadow-lg">
           <div className="border-b border-gray-100 p-2">
             <input
@@ -310,7 +346,7 @@ function AsyncPartySelect({
                 <PopoverOptionItem
                   key={opt.value}
                   option={opt}
-                  isSelected={String(value) === opt.value}
+                  isSelected={selectedValue === opt.value}
                   onSelect={(selected) => {
                     onChange(selected.value)
                     ctx.hooks.setValue(name, selected.value, {
@@ -385,13 +421,7 @@ function PartyFields({
   onQuickAdd: () => void
 }) {
   const ownerId = formCtx.hooks.watch(ownerName)
-  const { exporters, businesses } = getDemoData()
-  const owner =
-    kind === 'exporter'
-      ? (exporters.find((party) => String(party.id) === ownerId) ??
-        parties.find((party) => String(party.id) === ownerId))
-      : (businesses.find((party) => String(party.id) === ownerId) ??
-        parties.find((party) => String(party.id) === ownerId))
+  const owner = parties.find((party) => String(party.id) === ownerId)
 
   useEffect(() => {
     const selectedBranch = formCtx.hooks.getValues(branchName)
@@ -481,9 +511,9 @@ function PartyFields({
               }))
             }
           }}
-          getInitialLabel={async (id) => {
+          getInitialLabel={(id) => {
             const branch = owner?.branches.find((b) => String(b.id) === id)
-            return branch ? `${branch.branchName} · ${branch.city}` : ''
+            return Promise.resolve(branch ? `${branch.branchName} · ${branch.city}` : '')
           }}
         />
       </div>
@@ -554,7 +584,7 @@ function InvoiceEditor({
                 type="number"
                 min={0}
                 {...register(`invoices.${index}.invoiceTotal`)}
-                placeholder="0.00"
+                placeholder={invoiceTotal(invoice).toFixed(2)}
               />
             </div>
           </div>
@@ -591,6 +621,8 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      min={0}
+                      max={100}
                       {...register(`invoices.${index}.freightRate`)}
                       className="text-right"
                       disabled={invoiceValues.freightAmount !== '' && invoiceValues.freightAmount != null}
@@ -600,6 +632,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.freightAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.freightRate !== '' && invoiceValues.freightRate != null}
@@ -618,6 +651,8 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      min={0}
+                      max={100}
                       {...register(`invoices.${index}.insuranceRate`)}
                       className="text-right"
                       disabled={invoiceValues.insuranceAmount !== '' && invoiceValues.insuranceAmount != null}
@@ -627,6 +662,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.insuranceAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.insuranceRate !== '' && invoiceValues.insuranceRate != null}
@@ -647,6 +683,8 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      min={0}
+                      max={100}
                       {...register(`invoices.${index}.commissionRate`)}
                       className="text-right"
                       disabled={invoiceValues.commissionAmount !== '' && invoiceValues.commissionAmount != null}
@@ -656,6 +694,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.commissionAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.commissionRate !== '' && invoiceValues.commissionRate != null}
@@ -674,6 +713,8 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      min={0}
+                      max={100}
                       {...register(`invoices.${index}.discountRate`)}
                       className="text-right"
                       disabled={invoiceValues.discountAmount !== '' && invoiceValues.discountAmount != null}
@@ -683,6 +724,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.discountAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.discountRate !== '' && invoiceValues.discountRate != null}
@@ -703,6 +745,8 @@ function InvoiceEditor({
                   <div className="flex items-center gap-1">
                     <Input
                       type="number"
+                      min={0}
+                      max={100}
                       {...register(`invoices.${index}.otherDeductionsRate`)}
                       className="text-right"
                       disabled={
@@ -714,6 +758,7 @@ function InvoiceEditor({
                   </div>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.otherDeductionsAmount`)}
                     className="py-1 text-right"
                     disabled={invoiceValues.otherDeductionsRate !== '' && invoiceValues.otherDeductionsRate != null}
@@ -731,6 +776,7 @@ function InvoiceEditor({
                   <span className="w-28 shrink-0 font-medium text-gray-900">Packing Charges</span>
                   <Input
                     type="number"
+                    min={0}
                     {...register(`invoices.${index}.packingCharges`)}
                     className="py-1 text-right"
                     placeholder="Amount"
@@ -755,7 +801,7 @@ function InvoiceEditor({
               options={paymentTypes}
               placeholder="Select if applicable"
             />
-            <Input label="Payment period (days)" type="number" {...register(`invoices.${index}.periodOfPayment`)} />
+            <Input label="Payment period (days)" type="number" min={0} {...register(`invoices.${index}.periodOfPayment`)} />
           </div>
           <PartyFields
             formCtx={formCtx}
@@ -829,6 +875,7 @@ function InvoiceEditor({
                       type="number"
                       placeholder={`${invoice.currency} ${lineTotal(item).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
 
+                      min={0}
                       {...register(`invoices.${index}.items.${itemIndex}.lineTotal`)}
                     />
                     <Select<ShippingBillFormValues>
@@ -848,9 +895,9 @@ function InvoiceEditor({
                       const selectedScheme = schemeCodes.find((s) => s.value === item.schemeCode)
                       const showDrawback =
                         selectedScheme &&
-                        (selectedScheme.drawback === true ||
-                          selectedScheme.RODTEP === true ||
-                          selectedScheme.ROSCTL === true)
+                        (selectedScheme.drawback ||
+                          selectedScheme.RODTEP ||
+                          selectedScheme.ROSCTL)
                       return showDrawback ? (
                         <>
                           <div className="w-36">
@@ -999,25 +1046,25 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
   const { register, watch } = formCtx.hooks
   const documentValues = watch(`documents.${index}`)
 
-  const hasCustomValues = Boolean(
-    documentValues?.placeOfIssue ||
-    documentValues?.invoiceSerialNumber ||
-    documentValues?.itemSerialNumber ||
-    documentValues?.issuingPartyCode ||
-    documentValues?.issuingPartyName ||
-    documentValues?.issuingPartyAddress1 ||
-    documentValues?.issuingPartyAddress2 ||
-    documentValues?.issuingPartyCity ||
-    documentValues?.issuingPartyPin ||
-    documentValues?.beneficiaryPartyCode ||
-    documentValues?.beneficiaryPartyName ||
-    documentValues?.beneficiaryPartyAddress1 ||
-    documentValues?.beneficiaryPartyAddress2 ||
-    documentValues?.beneficiaryPartyCity ||
-    documentValues?.beneficiaryPartyPin ||
-    documentValues?.fileType ||
-    documentValues?.icegateId
-  )
+  const hasCustomValues = [
+    documentValues.placeOfIssue,
+    documentValues.invoiceSerialNumber,
+    documentValues.itemSerialNumber,
+    documentValues.issuingPartyCode,
+    documentValues.issuingPartyName,
+    documentValues.issuingPartyAddress1,
+    documentValues.issuingPartyAddress2,
+    documentValues.issuingPartyCity,
+    documentValues.issuingPartyPin,
+    documentValues.beneficiaryPartyCode,
+    documentValues.beneficiaryPartyName,
+    documentValues.beneficiaryPartyAddress1,
+    documentValues.beneficiaryPartyAddress2,
+    documentValues.beneficiaryPartyCity,
+    documentValues.beneficiaryPartyPin,
+    documentValues.fileType,
+    documentValues.icegateId
+  ].some(Boolean)
 
   const [showCustomDetails, setShowCustomDetails] = useState(hasCustomValues)
 
@@ -1035,19 +1082,21 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
           <AsyncPartySelect
             name={`documents.${index}.documentTypeCode`}
             placeholder="Search document type..."
-            fetchOptions={async (query) => {
+            fetchOptions={(query) => {
               const q = query.toLowerCase().trim()
               const filtered = documentCodes.filter(
                 (doc) => doc.label.toLowerCase().includes(q) || doc.value.toLowerCase().includes(q)
               )
-              return filtered.map((doc) => ({
-                value: doc.value,
-                label: doc.label
-              }))
+              return Promise.resolve(
+                filtered.map((doc) => ({
+                  value: doc.value,
+                  label: doc.label
+                }))
+              )
             }}
-            getInitialLabel={async (val) => {
+            getInitialLabel={(val) => {
               const found = documentCodes.find((doc) => doc.value === val || doc.label === val)
-              return found ? found.label : val
+              return Promise.resolve(found ? found.label : val)
             }}
           />
         </div>
@@ -1069,16 +1118,16 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
               name={`documents.${index}.fileType`}
               placeholder="Search file type..."
               className="bg-transparent"
-              fetchOptions={async (query) => {
+              fetchOptions={(query) => {
                 const q = query.toLowerCase().trim()
                 const options = [{ value: 'pdf', label: 'PDF' }]
-                return options.filter(
-                  (doc) => doc.label.toLowerCase().includes(q) || doc.value.toLowerCase().includes(q)
+                return Promise.resolve(
+                  options.filter((doc) => doc.label.toLowerCase().includes(q) || doc.value.toLowerCase().includes(q))
                 )
               }}
-              getInitialLabel={async (val) => {
+              getInitialLabel={(val) => {
                 const found = [{ value: 'pdf', label: 'PDF' }].find((doc) => doc.value === val || doc.label === val)
-                return found ? found.label : val
+                return Promise.resolve(found ? found.label : val)
               }}
             />
           </div>
@@ -1125,8 +1174,25 @@ function DocumentItem({ formCtx, index, onRemove }: { formCtx: BillFormContext; 
   )
 }
 
+function getLeafFieldPaths(value: unknown, prefix: string): Path<ShippingBillFormValues>[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => getLeafFieldPaths(item, `${prefix}.${index}`))
+  }
+
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+      getLeafFieldPaths(child, `${prefix}.${key}`)
+    )
+  }
+
+  return prefix ? [prefix as Path<ShippingBillFormValues>] : []
+}
+
 function BillEditor({ bill }: { bill?: SavedBill }) {
-  const { exporters, businesses } = useDemoData()
+  const [partyDirectory, setPartyDirectory] = useState<{ exporters: Exporter[]; businesses: Business[] }>({
+    exporters: [],
+    businesses: []
+  })
   const formCtx = useForm<ShippingBillFormValues>(billSchema, { defaultValues: bill?.values ?? emptyBill() })
   const { register, control, setValue, formState } = formCtx.hooks
   const values = formCtx.hooks.watch()
@@ -1149,6 +1215,23 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
   const { fields: licenses, append: addLicense, remove: removeLicense } = useFieldArray({ control, name: 'licenses' })
   const [activeTab, setActiveTab] = useState('details')
   const [draftId, setDraftId] = useState<number | undefined>(bill?.id)
+  const { exporters, businesses } = partyDirectory
+
+  useEffect(() => {
+    let active = true
+    void getPartyDirectory()
+      .then((directory) => {
+        if (active) setPartyDirectory(directory)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        console.error('Unable to load party options:', error)
+        toast.error('Unable to load exporter and consignee options. Please try again.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
   const [quickAdd, setQuickAdd] = useState<QuickAdd | null>(null)
   const [quickBranch, setQuickBranch] = useState<QuickBranch | null>(null)
   const [marksAndNumbersOptions, setMarksAndNumbersOptions] = useState<MarksAndNumbersOption[]>([])
@@ -1216,23 +1299,25 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
 
   async function handleSave(data: ShippingBillFormValues) {
     try {
-      const saved = saveBill(data, draftId)
+      const saved = await shippingBillMockService.submit(data, draftId)
       setDraftId(saved.id)
-      console.log('Shipping bill save payload', saved.payload)
-
-      // Submit payload to backend API (POST /api/shipping-bills from shipping_bill.http)
-      try {
-        const apiResult = await shippingBillService.upsert(data)
-        console.log('API response from POST /api/shipping-bills:', apiResult)
-      } catch (apiErr) {
-        console.log('Backend API sync notice (saved locally):', apiErr)
-      }
-
       toast.success(bill ? 'Shipping bill updated' : 'Shipping bill created')
       navigate(routes.toShippingBillEdit(saved.id))
-    } catch (err: any) {
-      console.error('Error saving shipping bill:', err)
-      toast.error('Failed to save shipping bill')
+    } catch (error) {
+      console.error('Error saving shipping bill:', error)
+      toast.error('Failed to save shipping bill. Please try again.')
+    }
+  }
+
+  async function saveDraft(values: ShippingBillFormValues): Promise<SavedBill | undefined> {
+    try {
+      const saved = await shippingBillMockService.saveDraft(values, draftId)
+      setDraftId(saved.id)
+      return saved
+    } catch (error) {
+      console.error('Unable to save shipping bill draft:', error)
+      toast.error('Unable to save draft. Please try again.')
+      return undefined
     }
   }
 
@@ -1261,9 +1346,6 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
     }
   }
 
-  const exporter = exporters.find((item) => String(item.id) === values.exporterId)
-  const consignee = businesses.find((item) => String(item.id) === values.consigneeId)
-  const totalLines = values.invoices.reduce((sum, invoice) => sum + invoice.items.length, 0)
 
   return (
     <div className="space-y-5">
@@ -1694,10 +1776,9 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
               <Button
                 variant="outline"
                 type="button"
-                onClick={() => {
-                  const current = formCtx.hooks.getValues()
-                  const saved = saveBill(current, draftId)
-                  setDraftId(saved.id)
+                onClick={async () => {
+                  const saved = await saveDraft(formCtx.hooks.getValues())
+                  if (!saved) return
                   setActiveTab(activeTab === 'documents' ? 'invoices' : 'details')
                 }}>
                 Previous
@@ -1706,19 +1787,31 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
             {activeTab !== 'documents' ? (
               <Button
                 type="button"
-                onClick={(e) => {
+                onClick={async (e) => {
                   e.preventDefault()
                   const current = formCtx.hooks.getValues()
-                  const saved = saveBill(current, draftId)
-                  setDraftId(saved.id)
+                  const groupedSections = new Set(['invoices', 'containers', 'packingRanges', 'documents', 'licenses'])
+                  const fieldsToValidate: Path<ShippingBillFormValues>[] =
+                    activeTab === 'details'
+                      ? (Object.keys(current).filter((field) => !groupedSections.has(field)) as Path<ShippingBillFormValues>[])
+                      : getLeafFieldPaths(current.invoices, 'invoices')
+
+                  const isValid = await formCtx.hooks.trigger(fieldsToValidate, { shouldFocus: true })
+                  if (!isValid) {
+                    toast.error('Please correct the highlighted fields before continuing')
+                    return
+                  }
+
+                  const saved = await saveDraft(formCtx.hooks.getValues())
+                  if (!saved) return
                   toast.success('Details saved')
                   setActiveTab(activeTab === 'details' ? 'invoices' : 'documents')
                 }}>
                 Save & Next
               </Button>
             ) : (
-              <Button type="submit">
-                Save changes
+              <Button type="submit" disabled={formState.isSubmitting}>
+                {formState.isSubmitting ? 'Saving...' : 'Save changes'}
               </Button>
             )}
           </div>
@@ -1748,14 +1841,63 @@ function BillEditor({ bill }: { bill?: SavedBill }) {
 
 export default function ShippingBillPage() {
   const { id } = useParams<{ id?: string }>()
-  const { bills } = useDemoData()
-  const bill = id ? (bills.find((item) => item.id === Number(id)) || shippingBillService.getById(id)) : undefined
-  if (id && !bill)
+  const [bill, setBill] = useState<SavedBill | undefined>()
+  const [isLoading, setIsLoading] = useState(Boolean(id))
+  const [loadFailed, setLoadFailed] = useState(false)
+
+  useEffect(() => {
+    let active = true
+
+    if (!id) {
+      setBill(undefined)
+      setIsLoading(false)
+      setLoadFailed(false)
+      return () => {
+        active = false
+      }
+    }
+
+    setIsLoading(true)
+    setLoadFailed(false)
+    void shippingBillMockService
+      .getById(id)
+      .then((result) => {
+        if (active) setBill(result)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        console.error('Unable to load shipping bill:', error)
+        setBill(undefined)
+        setLoadFailed(true)
+        toast.error('Unable to load shipping bill. Please try again.')
+      })
+      .finally(() => {
+        if (active) setIsLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [id])
+
+  if (id && isLoading) {
     return (
       <div className="space-y-3">
-        <h1 className="text-xl font-semibold">Shipping bill not found</h1>
+        <p className="text-sm text-gray-500">Loading shipping bill...</p>
+      </div>
+    )
+  }
+
+  if (id && !bill) {
+    return (
+      <div className="space-y-3">
+        <h1 className="text-xl font-semibold">
+          {loadFailed ? 'Unable to load shipping bill' : 'Shipping bill not found'}
+        </h1>
         <Button onClick={() => navigate(routes.dashboard)}>Back to list</Button>
       </div>
     )
+  }
+
   return <BillEditor key={id ?? 'new'} bill={bill} />
 }
